@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Picker preview. Rendered by the launcher with no data behind it, so the sample copy here mirrors
+  the shape of the real widget: one fact per row, none of them repeating the kicker. It shows the
+  plain-surface state, laid out like flixquest_widget.xml.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:layout_margin="@dimen/widget_margin"
+    android:background="@drawable/flixquest_widget_background"
+    android:clipToOutline="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="bottom"
+        android:orientation="horizontal"
+        android:padding="@dimen/widget_padding">
+
+        <!-- Only RemoteViews-safe views here: a bare View fails to inflate in the launcher. -->
+        <ImageView
+            android:layout_width="@dimen/widget_poster_width"
+            android:layout_height="@dimen/widget_poster_height"
+            android:layout_marginEnd="@dimen/widget_padding"
+            android:background="@drawable/flixquest_widget_poster_background"
+            android:contentDescription="@null"
+            android:importantForAccessibility="no" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="@dimen/widget_mark_gap"
+                    android:contentDescription="@null"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/flixquest_widget_mark"
+                    android:tint="#FFF57C00" />
+
+                <TextView
+                    style="@style/FlixQuestWidgetPreviewText.Kicker"
+                    android:text="MY LIST  ·  12 SAVED" />
+            </LinearLayout>
+
+            <TextView
+                style="@style/FlixQuestWidgetPreviewText.Title"
+                android:text="The last title you saved" />
+
+            <TextView
+                style="@style/FlixQuestWidgetPreviewText.Subtitle"
+                android:text="7 movies  ·  5 TV shows" />
+
+            <TextView
+                style="@style/FlixQuestWidgetPreviewText.Meta"
+                android:text="Movie  ·  2024" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

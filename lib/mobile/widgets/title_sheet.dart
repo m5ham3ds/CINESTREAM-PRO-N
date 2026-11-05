@@ -1,0 +1,196 @@
+import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/material.dart';
+import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:provider/provider.dart';
+
+import '../../catalog/media_item.dart';
+import '../../design/app_palette.dart';
+import '../../design/app_tokens.dart';
+import '../../widgets/playback_action.dart';
+import '../../provider/playlist_provider.dart';
+import '../my_list.dart';
+import '../playlists.dart';
+import 'page_kit.dart';
+import '../playback.dart';
+import 'media_art.dart';
+import 'pill_button.dart';
+
+/// "2024 · Movie · ★ 7.6": what a title is, in one short line.
+String mediaFacts(MediaItem item) => <String>[
+      if (item.year case final year?) year,
+      tr(item.kind == MediaKind.movie ? 'movie' : 'series_one'),
+      if (item.rating case final rating? when rating > 0)
+        '★ ${rating.toStringAsFixed(1)}',
+    ].join('  ·  ');
+
+/// A title's quick actions, from a long press on its card: Play, My List and
+/// Details, under its poster and synopsis.
+Future<void> showTitleSheet(BuildContext context, MediaItem item) {
+  final palette = AppPalette.of(context);
+  return showModalBottomSheet<void>(
+    context: context,
+    useRootNavigator: true,
+    isScrollControlled: true,
+    showDragHandle: true,
+    backgroundColor: palette.surface,
+    constraints: appSheetConstraints(context),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadii.sheet)),
+    ),
+    builder: (sheetContext) => _TitleSheet(item: item, host: context),
+  );
+}
+
+class _TitleSheet extends StatelessWidget {
+  const _TitleSheet({required this.item, required this.host});
+
+  final MediaItem item;
+
+  /// The page the sheet opened over, which outlives the sheet and so is
+  /// where routes are pushed from.
+  final BuildContext host;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final saved = MyList.contains(context, item);
+    void close() => Navigator.of(context).pop();
+    return SafeArea(
+      top: false,
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsetsDirectional.fromSTEB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(AppRadii.card),
+                    child: SizedBox(
+                      width: 84,
+                      height: 126,
+                      child: MediaArt(
+                        item: item,
+                        path: item.posterPath ?? item.backdropPath,
+                        width: 84,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: AppSpace.lg),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          item.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppType.sectionHeader.copyWith(
+                            fontFamily: AppType.bold,
+                            color: palette.foreground,
+                          ),
+                        ),
+                        const SizedBox(height: AppSpace.xs),
+                        Text(
+                          mediaFacts(item),
+                          style: AppType.metadata.copyWith(
+                            color: palette.mutedText,
+                          ),
+                        ),
+                        if (item.overview.isNotEmpty) ...<Widget>[
+                          const SizedBox(height: AppSpace.sm),
+                          Text(
+                            item.overview,
+                            maxLines: 4,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppType.body.copyWith(
+                              color: palette.secondaryText,
+                              fontSize: 13,
+                              height: 18 / 13,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpace.xl),
+              Row(
+                children: <Widget>[
+                  if (MobilePlayback.canPlay(context)) ...<Widget>[
+                    Expanded(
+                      child: PlaybackAction(
+                        onStart: () =>
+                            MobilePlayback.play(host, item, onReady: () {
+                          if (!context.mounted) return false;
+                          final route = ModalRoute.of(context);
+                          if (route?.isCurrent != true) return false;
+                          Navigator.of(context).removeRoute(route!);
+                          return true;
+                        }),
+                        builder: (context, busy, start) => PillButton(
+                          primary: true,
+                          busy: busy,
+                          icon: PhosphorIcons.play(PhosphorIconsStyle.fill),
+                          label: tr('play'),
+                          onPressed: start,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: AppSpace.sm),
+                  ],
+                  Expanded(
+                    child: PillButton(
+                      icon:
+                          saved ? PhosphorIcons.check() : PhosphorIcons.plus(),
+                      label: tr('my_list'),
+                      onPressed: () => MyList.toggle(context, item),
+                    ),
+                  ),
+                  const SizedBox(width: AppSpace.sm),
+                  Expanded(
+                    child: PillButton(
+                      icon: PhosphorIcons.info(),
+                      label: tr('details'),
+                      onPressed: () {
+                        close();
+                        MobilePlayback.openDetails(host, item);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              if (context.watch<PlaylistProvider?>() case final playlists?)
+                Padding(
+                  padding: const EdgeInsets.only(top: AppSpace.sm),
+                  child: ListRow(
+                    flush: true,
+                    icon: PhosphorIcons.listPlus(),
+                    label: tr('playlist_save_to'),
+                    subtitle: _listNames(playlists, item),
+                    onTap: () {
+                      close();
+                      showSaveToListSheet(host, item);
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The lists [item] is already in, for the line under "Save to a list".
+String? _listNames(PlaylistProvider playlists, MediaItem item) {
+  final names = <String>[
+    for (final list in playlists.lists)
+      if (list.contains(item)) list.name,
+  ];
+  return names.isEmpty ? null : names.join(', ');
+}

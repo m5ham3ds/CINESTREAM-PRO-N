@@ -1,0 +1,447 @@
+import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:phosphor_flutter/phosphor_flutter.dart';
+
+import '../app/tv_design.dart';
+import '../focus/tv_focusable.dart';
+
+/// Search's own keyboard: letters and digits in a six-column grid under
+/// Space, Delete and Clear, steered with the D-pad, the way Netflix's is.
+///
+/// Arrows move key to key by column, so Up and Down land where expected even
+/// between the wide keys and the letters. Right off the last column and Up
+/// off the top row are handed to [onExitRight] and [onExitUp]; Left off the
+/// first column goes to whatever is around the keyboard. A hardware keyboard
+/// types straight in while any key has focus.
+class TvSearchKeyboard extends StatefulWidget {
+  const TvSearchKeyboard({
+    required this.onType,
+    required this.onDelete,
+    required this.onClear,
+    this.onExitRight,
+    this.onExitUp,
+    this.width = 300,
+    super.key,
+  });
+
+  final ValueChanged<String> onType;
+  final VoidCallback onDelete;
+  final VoidCallback onClear;
+
+  /// Right off the last column; returns whether focus left the keyboard.
+  final bool Function()? onExitRight;
+
+  /// Up off the top row; returns whether focus left the keyboard. Without
+  /// it, Up there stays put.
+  final bool Function()? onExitUp;
+  final double width;
+
+  static const columns = 6;
+
+  /// The letters and digits, a row per [columns].
+  static const characters = 'abcdefghijklmnopqrstuvwxyz1234567890';
+
+  /// A key's height for each unit of width, and the gap under the top row.
+  static const _keyAspect = 0.82;
+  static const _actionGap = 6.0;
+  static final int _rows = 1 + (characters.length / columns).ceil();
+
+  /// How tall the keyboard is at [width].
+  static double heightFor(double width) =>
+      width / columns * _keyAspect * _rows + _actionGap;
+
+  /// The widest keyboard that fits in [height].
+  static double widthFor(double height) =>
+      (height - _actionGap) * columns / (_keyAspect * _rows);
+
+  @override
+  State<TvSearchKeyboard> createState() => TvSearchKeyboardState();
+}
+
+/// A key's place in the grid: its row and the columns it spans.
+class _KeySpec {
+  const _KeySpec({
+    required this.id,
+    required this.row,
+    required this.column,
+    this.span = 1,
+  });
+
+  final String id;
+  final int row;
+  final int column;
+  final int span;
+
+  bool covers(int col) => col >= column && col < column + span;
+}
+
+class TvSearchKeyboardState extends State<TvSearchKeyboard> {
+  static const _space = 'space';
+  static const _delete = 'delete';
+  static const _clear = 'clear';
+
+  static final List<_KeySpec> _keys = <_KeySpec>[
+    const _KeySpec(id: _space, row: 0, column: 0, span: 2),
+    const _KeySpec(id: _delete, row: 0, column: 2, span: 2),
+    const _KeySpec(id: _clear, row: 0, column: 4, span: 2),
+    for (var i = 0; i < TvSearchKeyboard.characters.length; i++)
+      _KeySpec(
+        id: TvSearchKeyboard.characters[i],
+        row: 1 + i ~/ TvSearchKeyboard.columns,
+        column: i % TvSearchKeyboard.columns,
+      ),
+  ];
+
+  static final int _rowCount = _keys.map((key) => key.row).reduce(
+            (a, b) => a > b ? a : b,
+          ) +
+      1;
+
+  final Map<String, FocusNode> _nodes = <String, FocusNode>{};
+
+  /// The key focus returns to, and the column Up and Down aim for, so moving
+  /// through a wide key keeps to the column it was entered from.
+  String _lastKey = 'a';
+  int _column = 0;
+
+  FocusNode _node(String id) => _nodes.putIfAbsent(
+        id,
+        () => FocusNode(
+          debugLabel: 'TV keyboard $id',
+          onKeyEvent: (_, event) => _handleKey(id, event),
+        ),
+      );
+
+  /// Focuses the key last used, and returns whether focus moved.
+  bool requestFocus() {
+    final node = _nodes[_lastKey];
+    if (node == null || node.context == null) return false;
+    node.requestFocus();
+    return true;
+  }
+
+  bool get hasFocus => _nodes.values.any((node) => node.hasFocus);
+
+  @override
+  void dispose() {
+    for (final node in _nodes.values) {
+      node.dispose();
+    }
+    super.dispose();
+  }
+
+  _KeySpec _spec(String id) => _keys.firstWhere((key) => key.id == id);
+
+  _KeySpec? _at(int row, int column) {
+    for (final key in _keys) {
+      if (key.row == row && key.covers(column)) return key;
+    }
+    return null;
+  }
+
+  void _focus(_KeySpec key) => _nodes[key.id]?.requestFocus();
+
+  KeyEventResult _handleKey(String id, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final spec = _spec(id);
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (spec.column == 0) return KeyEventResult.ignored;
+      final target = _at(spec.row, spec.column - 1)!;
+      _column = target.column;
+      _focus(target);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      final next = spec.column + spec.span;
+      if (next >= TvSearchKeyboard.columns) {
+        widget.onExitRight?.call();
+        return KeyEventResult.handled;
+      }
+      final target = _at(spec.row, next)!;
+      _column = target.column;
+      _focus(target);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.arrowDown) {
+      final row = spec.row + (key == LogicalKeyboardKey.arrowUp ? -1 : 1);
+      if (row < 0 && widget.onExitUp != null) {
+        widget.onExitUp!();
+        return KeyEventResult.handled;
+      }
+      // Nothing above or below: stay rather than wander out of the keyboard.
+      if (row >= 0 && row < _rowCount) {
+        final column = spec.covers(_column) ? _column : spec.column;
+        final target = _at(row, column) ?? _at(row, 0)!;
+        _column = column;
+        _focus(target);
+      }
+      return KeyEventResult.handled;
+    }
+    // A hardware keyboard types straight in.
+    if (key == LogicalKeyboardKey.backspace) {
+      widget.onDelete();
+      return KeyEventResult.handled;
+    }
+    final character = event.character?.toLowerCase();
+    if (character != null &&
+        character.length == 1 &&
+        (TvSearchKeyboard.characters.contains(character) || character == ' ')) {
+      widget.onType(character);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  void _activate(String id) {
+    switch (id) {
+      case _space:
+        widget.onType(' ');
+      case _delete:
+        widget.onDelete();
+      case _clear:
+        widget.onClear();
+      default:
+        widget.onType(id);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Localizations.localeOf(context);
+    final unit = widget.width / TvSearchKeyboard.columns;
+    Widget row(int index) => Row(
+          children: <Widget>[
+            for (final key in _keys.where((key) => key.row == index))
+              SizedBox(
+                width: unit * key.span,
+                height: unit * TvSearchKeyboard._keyAspect,
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: TvKeyboardKey(
+                    focusNode: _node(key.id),
+                    label: switch (key.id) {
+                      _space => tr('tv_space'),
+                      _delete => tr('tv_delete'),
+                      _clear => tr('clear'),
+                      final letter => letter,
+                    },
+                    icon: switch (key.id) {
+                      _space => PhosphorIcons.arrowsHorizontal(),
+                      _delete => PhosphorIcons.backspace(),
+                      _clear => PhosphorIcons.x(),
+                      _ => null,
+                    },
+                    onFocused: () {
+                      _lastKey = key.id;
+                      if (!key.covers(_column)) _column = key.column;
+                    },
+                    onActivate: () => _activate(key.id),
+                  ),
+                ),
+              ),
+          ],
+        );
+    return SizedBox(
+      width: widget.width,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          row(0),
+          const SizedBox(height: TvSearchKeyboard._actionGap),
+          for (var index = 1; index < _rowCount; index++) row(index),
+        ],
+      ),
+    );
+  }
+}
+
+/// A key: its label in muted type, and a white tile under focus, the way
+/// the rail's destinations light up. The form keyboard uses it too.
+class TvKeyboardKey extends StatefulWidget {
+  const TvKeyboardKey({
+    required this.focusNode,
+    required this.label,
+    required this.onFocused,
+    required this.onActivate,
+    this.icon,
+    this.trailingIcon,
+    this.prominent = false,
+    super.key,
+  });
+
+  final FocusNode focusNode;
+  final String label;
+
+  /// Drawn instead of [label]; [trailingIcon] is drawn after it.
+  final IconData? icon;
+  final IconData? trailingIcon;
+
+  /// Rests brighter, like a screen's main button.
+  final bool prominent;
+  final VoidCallback onFocused;
+  final VoidCallback onActivate;
+
+  @override
+  State<TvKeyboardKey> createState() => _TvKeyboardKeyState();
+}
+
+class _TvKeyboardKeyState extends State<TvKeyboardKey> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    Localizations.localeOf(context);
+    final palette = TvPalette.of(context);
+    final foreground = _focused ? palette.onFocus : palette.foreground;
+    final icon = widget.icon;
+    final trailingIcon = widget.trailingIcon;
+    final label = Text(
+      widget.label,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        color: foreground,
+        fontFamily: 'FigtreeSB',
+        fontSize: 18,
+        height: 1,
+      ),
+    );
+    return TvFocusable(
+      focusNode: widget.focusNode,
+      semanticLabel: widget.label,
+      onActivate: widget.onActivate,
+      onFocusChanged: (hasFocus) {
+        if (hasFocus) widget.onFocused();
+        if (hasFocus != _focused) setState(() => _focused = hasFocus);
+      },
+      focusScale: 1,
+      focusColor: Colors.transparent,
+      borderRadius: BorderRadius.circular(TvDesign.cardRadius),
+      scrollAlignment: null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: _focused
+              ? palette.focusFill
+              : widget.prominent
+                  ? palette.idleFillStrong
+                  : palette.idleFillFaint,
+          borderRadius: BorderRadius.circular(TvDesign.cardRadius),
+        ),
+        child: icon != null
+            ? Icon(icon, color: foreground, size: 20)
+            : trailingIcon != null
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Flexible(child: label),
+                      const SizedBox(width: 8),
+                      Icon(trailingIcon, color: foreground, size: 20),
+                    ],
+                  )
+                : label,
+      ),
+    );
+  }
+}
+
+/// What has been typed, with a cursor, above the keyboard.
+class TvSearchQueryField extends StatelessWidget {
+  const TvSearchQueryField({
+    required this.query,
+    required this.hint,
+    required this.compact,
+    this.searching = false,
+    super.key,
+  });
+
+  final String query;
+
+  /// Shown in muted type while nothing is typed.
+  final String hint;
+  final bool searching;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    Localizations.localeOf(context);
+    final palette = TvPalette.of(context);
+    final empty = query.isEmpty;
+    return Semantics(
+      label: empty
+          ? tr('tv_search_nothing_typed')
+          : tr('tv_search_query_semantics', namedArgs: {'query': query}),
+      liveRegion: true,
+      child: Container(
+        padding: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              color: palette.foreground.withValues(alpha: 0.2),
+            ),
+          ),
+        ),
+        child: Row(
+          children: <Widget>[
+            Icon(
+              PhosphorIcons.magnifyingGlass(),
+              color: palette.mutedText,
+              size: compact ? 20 : 22,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Row(
+                children: <Widget>[
+                  Flexible(
+                    // Scrolled to its end, so a long query shows what was
+                    // typed last, where the cursor is.
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      reverse: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      child: Text(
+                        empty ? hint : query,
+                        maxLines: 1,
+                        softWrap: false,
+                        style: TextStyle(
+                          color: empty ? palette.mutedText : palette.foreground,
+                          fontFamily: empty ? 'Figtree' : 'FigtreeSB',
+                          fontSize: compact ? 20 : 24,
+                          height: 1.1,
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (!empty)
+                    Container(
+                      width: 2,
+                      height: compact ? 22 : 26,
+                      margin: const EdgeInsets.only(left: 2),
+                      color: palette.foreground,
+                    ),
+                ],
+              ),
+            ),
+            // Built only while searching: a spinner keeps animating, and
+            // drawing frames, even when faded out.
+            if (searching)
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: palette.mutedText,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}

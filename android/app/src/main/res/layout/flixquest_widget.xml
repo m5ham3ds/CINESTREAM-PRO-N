@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The wide layout, laid out like the app's hero card: backdrop full bleed, shaded towards the foot,
+  with the poster and the facts sitting on the bottom edge.
+
+  Every text slot is an ImageView. The launcher inflates widgets with a restricted context, and a
+  TextView there drops @font resources and falls back to the system font, so the provider draws
+  the text in Figtree itself and hands it over as bitmaps (see WidgetText).
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/widget_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:layout_margin="@dimen/widget_margin"
+    android:background="@drawable/flixquest_widget_background"
+    android:clipToOutline="true">
+
+    <!--
+      The container background exists to give clipToOutline its rounded outline; this view is the
+      layer that actually carries the app's surface colour, tinted at runtime.
+    -->
+    <ImageView
+        android:id="@+id/widget_surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/flixquest_widget_surface" />
+
+    <!-- Backdrop art. Never the poster: that would be the same image twice in one widget. -->
+    <ImageView
+        android:id="@+id/widget_hero"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:importantForAccessibility="no"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        tools:src="@drawable/icon"
+        tools:visibility="visible" />
+
+    <ImageView
+        android:id="@+id/widget_scrim_side"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/flixquest_widget_scrim_side"
+        android:visibility="gone"
+        tools:visibility="visible" />
+
+    <ImageView
+        android:id="@+id/widget_scrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/flixquest_widget_scrim"
+        android:visibility="gone"
+        tools:visibility="visible" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="bottom"
+        android:orientation="horizontal"
+        android:padding="@dimen/widget_padding">
+
+        <ImageView
+            android:id="@+id/widget_poster"
+            android:layout_width="@dimen/widget_poster_width"
+            android:layout_height="@dimen/widget_poster_height"
+            android:layout_marginEnd="@dimen/widget_padding"
+            android:background="@drawable/flixquest_widget_poster_background"
+            android:clipToOutline="true"
+            android:contentDescription="@null"
+            android:scaleType="centerCrop"
+            tools:src="@drawable/icon" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <include layout="@layout/flixquest_widget_kicker" />
+
+            <ImageView
+                android:id="@+id/widget_title"
+                style="@style/FlixQuestWidgetText"
+                android:layout_marginTop="6dp" />
+
+            <ImageView
+                android:id="@+id/widget_subtitle"
+                style="@style/FlixQuestWidgetText"
+                android:layout_marginTop="5dp" />
+
+            <ImageView
+                android:id="@+id/widget_meta"
+                style="@style/FlixQuestWidgetText"
+                android:layout_marginTop="4dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- The only place a completion ratio is expressed. -->
+    <include layout="@layout/flixquest_widget_progress" />
+</FrameLayout>

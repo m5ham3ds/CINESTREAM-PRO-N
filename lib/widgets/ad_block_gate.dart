@@ -1,0 +1,256 @@
+import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/material.dart';
+import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:provider/provider.dart';
+
+import '../core/config/app_runtime.dart';
+import '../data/ads/ads_policy.dart';
+import '../design/app_palette.dart';
+import '../design/app_tokens.dart';
+import '../mobile/widgets/pill_button.dart';
+import '../provider/app_dependency_provider.dart';
+import '../provider/settings_provider.dart';
+import '../services/ad_block_detector.dart';
+import '../services/ad_block_check_cache.dart';
+import '../services/ad_block_network_probe.dart';
+import '../services/ad_block_webview_probe.dart';
+import '../services/device_presentation_service.dart';
+import '../tv/widgets/tv_dialog.dart';
+import 'plus/plus_visuals.dart';
+
+/// Browsing stays open to everyone; Play and Download ask viewers whose ad
+/// blocker hides FlixQuest's ads to turn it off first. Every loader calls
+/// [allowPlayback] before it looks for sources, so all entry points share it.
+class AdBlockGate {
+  AdBlockGate({
+    AdBlockDetector? detector,
+    List<Future<bool> Function(BuildContext)>? additionalChecks,
+    AdBlockCheckCache? cache,
+  })  : _detector = detector ?? AdBlockDetector(),
+        _cache = cache ?? AdBlockCheckCache(),
+        _additionalChecks = additionalChecks ??
+            [
+              (_) => AdBlockNetworkProbe().isBlocking(),
+              AdBlockWebViewProbe.isBlocking,
+            ] {
+    // Plus has no ads to protect: a block found before payment must not
+    // linger, and players re-read the gate when it lifts.
+    AdsPolicy.addListener(_cache.invalidate);
+  }
+
+  static final instance = AdBlockGate();
+
+  final AdBlockDetector _detector;
+  final AdBlockCheckCache _cache;
+  final List<Future<bool> Function(BuildContext)> _additionalChecks;
+
+  void invalidate() => _cache.invalidate();
+  void addListener(VoidCallback listener) => _cache.addListener(listener);
+  void removeListener(VoidCallback listener) => _cache.removeListener(listener);
+  bool blocksPlayback(AppDependencyProvider provider) =>
+      !AppRuntime.localDevelopment &&
+      !AdsPolicy.adFree &&
+      provider.adBlockGateEnabled &&
+      _cache.isBlocked(_key(provider, _hosts(provider)));
+
+  Set<String> _hosts(AppDependencyProvider provider) => {
+        ...AdBlockDetector.dnsProbeHosts,
+        ...AdBlockDetector.adHosts(provider),
+      };
+
+  Object _key(AppDependencyProvider provider, Set<String> hosts) => (
+        provider,
+        provider.adBlockGateEnabled,
+        (hosts.toList()..sort()).join(',')
+      );
+
+  Future<bool> _scan(BuildContext context, Set<String> hosts) =>
+      _detector.isBlocking(hosts, additionalChecks: [
+        for (final check in _additionalChecks) () => check(context),
+      ]);
+
+  Future<void> warmUp(BuildContext context) async {
+    if (AppRuntime.localDevelopment) {
+      invalidate();
+      return;
+    }
+    final provider = context.read<AppDependencyProvider?>();
+    if (provider == null ||
+        !provider.adBlockGateEnabled ||
+        AdsPolicy.adFreeAt(context)) {
+      invalidate();
+      return;
+    }
+    final hosts = _hosts(provider);
+    await _cache.warm(_key(provider, hosts), () => _scan(context, hosts));
+  }
+
+  /// False when the viewer backs out; the loader then closes.
+  Future<bool> allowPlayback(BuildContext context,
+      {bool download = false, bool television = false}) async {
+    if (AppRuntime.localDevelopment) return context.mounted;
+    final provider = context.read<AppDependencyProvider?>();
+    if (provider == null ||
+        !provider.adBlockGateEnabled ||
+        AdsPolicy.adFreeAt(context)) {
+      invalidate();
+      debugPrint(
+          '[AdBlockGate] skipped: gate disabled, ad-free or no provider');
+      return true;
+    }
+    final tv = television || DevicePresentationService.instance.isTelevision;
+    final analytics = context.read<SettingsProvider?>()?.analytics;
+    var asked = false;
+    while (provider.adBlockGateEnabled) {
+      final hosts = _hosts(provider);
+      final watch = Stopwatch()..start();
+      final blocked = await _cache.check(
+          _key(provider, hosts), () => _scan(context, hosts));
+      debugPrint('[AdBlockGate] wait=${watch.elapsedMilliseconds}ms '
+          'result=${blocked == null ? 'pending; allow' : blocked ? 'blocked' : 'allow'}');
+      if (!context.mounted) return false;
+      if (!provider.adBlockGateEnabled || blocked != true || AdsPolicy.adFree) {
+        break;
+      }
+      analytics?.trackAdBlockerGate(
+          outcome: 'detected', download: download, television: tv);
+      final plus = AdsPolicy.offersPlus(context);
+      final choice =
+          await _ask(context, television: tv, again: asked, plus: plus);
+      if (!context.mounted) return false;
+      if (choice == _Choice.plus) {
+        analytics?.trackAdBlockerGate(
+            outcome: 'plus', download: download, television: tv);
+        await AdsPolicy.openPlus(context);
+        if (!context.mounted) return false;
+        // Paid on the way: nothing left to block. Otherwise ask again.
+        if (AdsPolicy.adFree) break;
+        continue;
+      }
+      if (choice != _Choice.retry) {
+        analytics?.trackAdBlockerGate(
+            outcome: 'cancelled', download: download, television: tv);
+        return false;
+      }
+      asked = true;
+      invalidate();
+    }
+    if (asked) {
+      analytics?.trackAdBlockerGate(
+          outcome: 'cleared', download: download, television: tv);
+    }
+    return context.mounted;
+  }
+
+  /// [_Choice.retry] checks again, after the viewer turned the blocker
+  /// off; [_Choice.plus] (offered when [plus]) opens FlixQuest Plus.
+  Future<_Choice?> _ask(BuildContext context,
+      {required bool television, required bool again, bool plus = false}) {
+    final message = again
+        ? tr('ad_blocker_still_detected')
+        : '${tr('ad_blocker_message')}\n\n${tr('ad_blocker_private_dns_hint')}';
+    if (television) {
+      return showTvDialog<_Choice>(
+        context: context,
+        title: tr('ad_blocker_title'),
+        content: Text(message),
+        actions: [
+          TvDialogAction(
+            label: tr('ad_blocker_retry'),
+            isPrimary: true,
+            onPressed: () => Navigator.pop(context, _Choice.retry),
+          ),
+          if (plus)
+            TvDialogAction(
+              label: tr('plus_go_ad_free'),
+              onPressed: () => Navigator.pop(context, _Choice.plus),
+            ),
+          TvDialogAction(
+            label: tr('cancel'),
+            onPressed: () => Navigator.pop(context, _Choice.cancel),
+          ),
+        ],
+      );
+    }
+    return showDialog<_Choice>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        final palette = AppPalette.of(dialogContext);
+        return Dialog(
+          backgroundColor: palette.surface,
+          surfaceTintColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadii.hero),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(AppSpace.xl),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: palette.idleFill,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        PhosphorIcons.shieldWarning(),
+                        size: 22,
+                        color: palette.foreground,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: AppSpace.lg),
+                  Text(
+                    tr('ad_blocker_title'),
+                    style: AppType.sectionHeader.copyWith(
+                      fontFamily: AppType.bold,
+                      color: palette.foreground,
+                    ),
+                  ),
+                  const SizedBox(height: AppSpace.sm),
+                  Text(
+                    message,
+                    style: AppType.body.copyWith(color: palette.mutedText),
+                  ),
+                  const SizedBox(height: AppSpace.xxl),
+                  PillButton(
+                    label: tr('ad_blocker_retry'),
+                    primary: true,
+                    onPressed: () =>
+                        Navigator.pop(dialogContext, _Choice.retry),
+                  ),
+                  if (plus) ...<Widget>[
+                    const SizedBox(height: AppSpace.md),
+                    PillButton(
+                      label: tr('plus_go_ad_free'),
+                      leading: const PlusMark(),
+                      onPressed: () =>
+                          Navigator.pop(dialogContext, _Choice.plus),
+                    ),
+                  ],
+                  const SizedBox(height: AppSpace.md),
+                  PillButton(
+                    label: tr('cancel'),
+                    onPressed: () =>
+                        Navigator.pop(dialogContext, _Choice.cancel),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+enum _Choice { retry, plus, cancel }

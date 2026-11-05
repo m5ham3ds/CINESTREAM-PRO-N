@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The narrow layout. There is no room for a poster column, so the artwork fills the card and the
+  facts stack at its foot. Same ids as the wide layout, minus the poster and the side shade, which
+  the provider never touches in this bucket. Text slots are bitmaps for the reason given in
+  flixquest_widget.xml.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/widget_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:layout_margin="@dimen/widget_margin"
+    android:background="@drawable/flixquest_widget_background"
+    android:clipToOutline="true">
+
+    <ImageView
+        android:id="@+id/widget_surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/flixquest_widget_surface" />
+
+    <ImageView
+        android:id="@+id/widget_hero"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:importantForAccessibility="no"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        tools:src="@drawable/icon"
+        tools:visibility="visible" />
+
+    <ImageView
+        android:id="@+id/widget_scrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/flixquest_widget_scrim"
+        android:visibility="gone"
+        tools:visibility="visible" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="bottom"
+        android:orientation="vertical"
+        android:padding="@dimen/widget_padding_compact">
+
+        <include layout="@layout/flixquest_widget_kicker" />
+
+        <ImageView
+            android:id="@+id/widget_title"
+            style="@style/FlixQuestWidgetText"
+            android:layout_marginTop="5dp" />
+
+        <ImageView
+            android:id="@+id/widget_subtitle"
+            style="@style/FlixQuestWidgetText"
+            android:layout_marginTop="4dp" />
+
+        <ImageView
+            android:id="@+id/widget_meta"
+            style="@style/FlixQuestWidgetText"
+            android:layout_marginTop="3dp" />
+    </LinearLayout>
+
+    <include layout="@layout/flixquest_widget_progress" />
+</FrameLayout>

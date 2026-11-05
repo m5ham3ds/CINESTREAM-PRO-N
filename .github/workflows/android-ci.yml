@@ -1,0 +1,311 @@
+name: CINESTREAM-PRO-N Local Android APK Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'APK build mode'
+        required: true
+        type: choice
+        options:
+          - release
+          - debug
+        default: release
+
+env:
+  # Release is the default for pushes, pull requests, and manual runs.
+  # Select Debug manually only when investigating a Release-only failure.
+  BUILD_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.build_mode || 'release' }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # The repository currently has no Gradle Wrapper because android/.gitignore
+      # was excluding gradlew and gradle-wrapper.jar. Install the pinned Gradle
+      # version here so CI can generate a project wrapper before Flutter builds.
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.7'
+
+      # Keep one CI-only signing identity so Release and Debug APKs can be
+      # installed over each other and successive CI builds remain updatable.
+      # This is NOT a production distribution key.
+      - name: Restore CI development signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: cinestream-pro-n-debug-signing-v1-${{ github.repository }}
+
+      - name: Ensure CI development signing key exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          if [ ! -s "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Set up Flutter 3.35.7
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.35.7'
+          cache: true
+          pub-cache: true
+
+      # Installs Android command-line tools, accepts SDK licenses, and
+      # installs the exact SDK/NDK packages required by this project.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358'
+
+      - name: Prepare local environment and resolve dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # .env is intentionally git-ignored. Recreate it from the tracked
+          # template on every clean GitHub runner, including TMDB_API_KEY.
+          test -f .env.example
+          cp .env.example .env
+          flutter pub get
+
+      - name: Generate missing Android Gradle Wrapper
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Flutter's settings.gradle requires flutter.sdk before Gradle can
+          # configure the Android project. Preserve any existing local values.
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+
+          path = Path('local.properties')
+          values = {}
+          if path.exists():
+              for raw in path.read_text().splitlines():
+                  line = raw.strip()
+                  if line and not line.startswith('#') and '=' in line:
+                      key, value = line.split('=', 1)
+                      values[key.strip()] = value.strip()
+          values['flutter.sdk'] = os.environ['FLUTTER_ROOT']
+          values['sdk.dir'] = os.environ.get('ANDROID_HOME', os.environ.get('ANDROID_SDK_ROOT', ''))
+          path.write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+          PYTHON
+
+          # Generate gradlew, gradlew.bat and gradle-wrapper.jar using pinned Gradle.
+          gradle wrapper --gradle-version 8.7 --distribution-type all
+          test -s gradlew
+          test -s gradle/wrapper/gradle-wrapper.jar
+          test -s gradle/wrapper/gradle-wrapper.properties
+          chmod +x gradlew
+
+      - name: Build production ${{ env.BUILD_MODE }} APK (local development mode, ARM64 only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$BUILD_MODE" in
+            release)
+              BUILD_FLAG=--release
+              APK_OUTPUT=build/app/outputs/flutter-apk/app-prod-release.apk
+              ;;
+            debug)
+              BUILD_FLAG=--debug
+              APK_OUTPUT=build/app/outputs/flutter-apk/app-prod-debug.apk
+              ;;
+            *)
+              echo "Unsupported BUILD_MODE: $BUILD_MODE" >&2
+              exit 2
+              ;;
+          esac
+
+          flutter build apk "$BUILD_FLAG" --flavor prod --target lib/main.dart \
+            --target-platform android-arm64 \
+            -Pdisable-abi-filtering=true \
+            --dart-define=ENABLE_FIREBASE=false \
+            --dart-define=LOCAL_DEV_MODE=true
+
+          test -s "$APK_OUTPUT"
+          cp "$APK_OUTPUT" CINESTREAM-PRO-N-apk.apk
+          test -s CINESTREAM-PRO-N-apk.apk
+
+      - name: Audit APK size and ABI payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          from collections import defaultdict
+          from pathlib import Path
+          import os
+          import zipfile
+
+          build_mode = os.environ.get('BUILD_MODE', 'release').upper()
+          apk = Path('CINESTREAM-PRO-N-apk.apk')
+          if not apk.is_file() or apk.stat().st_size == 0:
+              raise SystemExit('APK artifact is missing or empty')
+
+          with zipfile.ZipFile(apk) as archive:
+              members = [item for item in archive.infolist() if not item.is_dir()]
+              native_entries = []
+              abi_files = defaultdict(list)
+              abi_sizes = defaultdict(lambda: [0, 0])
+              abi_dirs = set()
+
+              for item in members:
+                  parts = Path(item.filename).parts
+                  if len(parts) >= 3 and parts[0] == 'lib':
+                      abi = parts[1]
+                      abi_dirs.add(abi)
+                      native_entries.append(item)
+                      abi_files[abi].append(item)
+                      abi_sizes[abi][0] += item.compress_size
+                      abi_sizes[abi][1] += item.file_size
+
+              abi_dirs = sorted(abi_dirs)
+              groups = defaultdict(lambda: [0, 0])
+              for item in members:
+                  parts = Path(item.filename).parts
+                  if parts[0] == 'lib':
+                      group = f'Native libraries ({parts[1] if len(parts) > 1 else "unknown ABI"})'
+                  elif parts[0] == 'assets':
+                      group = 'Flutter/assets'
+                  elif parts[0] == 'res' or item.filename == 'resources.arsc':
+                      group = 'Android resources'
+                  elif item.filename.endswith('.dex'):
+                      group = 'DEX bytecode'
+                  elif parts[0] == 'META-INF':
+                      group = 'META-INF'
+                  else:
+                      group = 'Other'
+                  groups[group][0] += item.compress_size
+                  groups[group][1] += item.file_size
+
+              total = apk.stat().st_size
+              lines = [
+                  '# APK size and ABI audit',
+                  '',
+                  f'- Artifact: `{apk.name}`',
+                  f'- Build mode: **{build_mode}**',
+                  f'- APK size: **{total / (1024 * 1024):.2f} MiB** ({total:,} bytes)',
+                  f'- Native ABIs found: **{", ".join(abi_dirs) if abi_dirs else "none"}**',
+                  '- Required native ABIs: **arm64-v8a only**',
+                  '- Build target: `android-arm64` (single APK; no split-per-ABI)',
+                  '',
+                  '## Native library payload by ABI',
+                  '',
+                  '| ABI | .so files | Compressed in APK | Uncompressed |',
+                  '|---|---:|---:|---:|',
+              ]
+              for abi in abi_dirs:
+                  compressed, uncompressed = abi_sizes[abi]
+                  lines.append(
+                      f'| `{abi}` | {len(abi_files[abi])} | '
+                      f'{compressed / (1024 * 1024):.2f} MiB | '
+                      f'{uncompressed / (1024 * 1024):.2f} MiB |'
+                  )
+
+              lines += [
+                  '',
+                  '## Payload by category',
+                  '',
+                  '| Category | Compressed in APK | Uncompressed |',
+                  '|---|---:|---:|',
+              ]
+              for group, (compressed, uncompressed) in sorted(
+                  groups.items(), key=lambda entry: entry[1][0], reverse=True
+              ):
+                  lines.append(
+                      f'| {group} | {compressed / (1024 * 1024):.2f} MiB | '
+                      f'{uncompressed / (1024 * 1024):.2f} MiB |'
+                  )
+
+              largest_native = sorted(native_entries, key=lambda item: item.file_size, reverse=True)[:40]
+              lines += [
+                  '',
+                  '## Largest native libraries',
+                  '',
+                  '| ABI | Library | Compressed | Uncompressed |',
+                  '|---|---|---:|---:|',
+              ]
+              for item in largest_native:
+                  parts = Path(item.filename).parts
+                  lines.append(
+                      f'| `{parts[1]}` | `{parts[-1]}` | '
+                      f'{item.compress_size / (1024 * 1024):.2f} MiB | '
+                      f'{item.file_size / (1024 * 1024):.2f} MiB |'
+                  )
+
+              largest = sorted(members, key=lambda item: item.file_size, reverse=True)[:25]
+              lines += [
+                  '',
+                  '## Largest APK entries',
+                  '',
+                  '| Entry | Compressed | Uncompressed |',
+                  '|---|---:|---:|',
+              ]
+              for item in largest:
+                  lines.append(
+                      f'| `{item.filename}` | {item.compress_size / (1024 * 1024):.2f} MiB | '
+                      f'{item.file_size / (1024 * 1024):.2f} MiB |'
+                  )
+
+              report = '\n'.join(lines) + '\n'
+              Path('apk-size-report.md').write_text(report)
+              print(report)
+
+              # Fail only after writing the report, so CI can upload the APK
+              # and forensic ABI breakdown even when the architecture audit fails.
+              if abi_dirs != ['arm64-v8a']:
+                  raise SystemExit(
+                      f'Expected ARM64-only APK; found ABI directories: {abi_dirs}. '
+                      'See apk-size-report.md for per-ABI library details.'
+                  )
+          PYTHON
+
+          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
+          if [ -x "$AAPT" ]; then
+            "$AAPT" dump badging CINESTREAM-PRO-N-apk.apk | grep -F "name='com.m5ham3ds.cinestreampron'"
+          fi
+          cat apk-size-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact and ABI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: CINESTREAM-PRO-N-apk
+          path: |
+            CINESTREAM-PRO-N-apk.apk
+            apk-size-report.md
+          if-no-files-found: warn
+          retention-days: 14

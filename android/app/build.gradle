@@ -1,0 +1,190 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+// Firebase is intentionally disabled during the current development phase.
+// Enable it later with -PenableFirebaseGradlePlugins=true and provide a
+// matching android/app/google-services.json for this applicationId.
+def enableFirebaseGradlePlugins = project.hasProperty('enableFirebaseGradlePlugins') &&
+        project.property('enableFirebaseGradlePlugins').toString().toBoolean()
+
+if (enableFirebaseGradlePlugins) {
+    if (!file('google-services.json').isFile()) {
+        throw new GradleException(
+            'Firebase Gradle plugins were enabled, but android/app/google-services.json is missing.'
+        )
+    }
+    apply plugin: 'com.google.gms.google-services'
+    apply plugin: 'com.google.firebase.crashlytics'
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader ->
+        localProperties.load(reader)
+    }
+}
+
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+if (flutterVersionCode == null) {
+    flutterVersionCode = '1'
+}
+
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+if (flutterVersionName == null) {
+    flutterVersionName = '1.0'
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+def releaseSigningKeys = ['keyAlias', 'keyPassword', 'storeFile', 'storePassword']
+def hasReleaseSigning = keystorePropertiesFile.isFile() && releaseSigningKeys.every { key ->
+    def value = keystoreProperties.getProperty(key)
+    value != null && !value.trim().isEmpty()
+} && file(keystoreProperties.getProperty('storeFile')).isFile()
+
+android {
+    namespace 'com.m5ham3ds.cinestreampron'
+    compileSdk 36
+    ndkVersion "28.2.13676358"
+    buildToolsVersion "36.0.0"
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
+
+    defaultConfig {
+        applicationId "com.m5ham3ds.cinestreampron"
+        minSdkVersion flutter.minSdkVersion
+        targetSdkVersion 36
+        versionCode flutterVersionCode.toInteger()
+        versionName flutterVersionName
+        multiDexEnabled true
+        ndk {
+            // Flutter 3.35+ pre-populates ABI filters for its supported targets.
+            // Clear that inherited set before selecting this app's single target ABI;
+            // merely adding arm64-v8a would leave armeabi-v7a and x86_64 enabled.
+            abiFilters.clear()
+            abiFilters.add('arm64-v8a')
+        }
+    }
+
+    // Compress native .so files in the APK to reduce the downloadable artifact size.
+    // Android extracts these libraries at install time; this changes packaging, not the
+    // selected ABI or the native engines included in the app.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            // Hard packaging guard: third-party AARs may contribute prebuilt
+            // native libraries for ABIs that this APK must not ship. The ABI
+            // filters above control the variant; these excludes ensure that
+            // non-ARM64 .so payloads cannot leak into the final APK.
+            excludes += [
+                '**/armeabi-v7a/**',
+                '**/armeabi/**',
+                '**/x86/**',
+                '**/x86_64/**',
+                '**/mips/**',
+                '**/mips64/**',
+                '**/riscv64/**',
+                // Khronos validation layer is a debug diagnostic layer, not
+                // a runtime dependency for Flutter/BetterPlayer video playback.
+                '**/libVkLayer_khronos_validation.so'
+            ]
+        }
+    }
+
+    flavorDimensions "environment"
+    productFlavors {
+        prod {
+            dimension "environment"
+            manifestPlaceholders = [appLabel: "CineStream Pro N"]
+            // The CI artifact is a single production APK for modern ARM64 phones.
+            // Keep the filter on the selected flavor as well as defaultConfig;
+            // CI disables Flutter's automatic ABI filter so this explicit flavor
+            // configuration is authoritative.
+            ndk {
+                abiFilters.clear()
+                abiFilters.add('arm64-v8a')
+            }
+        }
+        dev {
+            dimension "environment"
+            // Keep the same Android application ID as prod for now. Firebase
+            // registration will be updated to this package when enabled later.
+            manifestPlaceholders = [appLabel: "CineStream Pro N Dev"]
+        }
+    }
+
+    signingConfigs {
+       release {
+           keyAlias keystoreProperties['keyAlias']
+           keyPassword keystoreProperties['keyPassword']
+           storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+           storePassword keystoreProperties['storePassword']
+       }
+   }
+   
+   buildTypes {
+       release {
+           // Use the project's private release key when key.properties is
+           // supplied. For local/CI development builds without that key,
+           // fall back to the standard debug signing identity so Release APKs
+           // remain installable and can be compared with Debug builds.
+           // Configure a private keystore before distributing to users.
+           signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
+           shrinkResources true
+           minifyEnabled true
+       }
+   }
+
+    // `flutter build apk --split-per-abi` adds 1000/2000/4000 to each ABI's
+    // versionCode. Every APK keeps the pubspec build number instead, so the
+    // in-app updater's build comparison holds and devices can move between
+    // the universal and per-ABI APKs without a downgrade error. Registered
+    // after the Flutter plugin's hook, so it runs last.
+    applicationVariants.configureEach { variant ->
+        variant.outputs.each { output ->
+            output.versionCodeOverride = flutterVersionCode.toInteger()
+        }
+    }
+}
+
+flutter {
+    source '../..'
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    def media3Version = '1.8.0'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+    implementation 'androidx.multidex:multidex:2.0.1'
+    implementation "androidx.media3:media3-database:$media3Version"
+    implementation "androidx.media3:media3-datasource:$media3Version"
+    implementation "androidx.media3:media3-exoplayer:$media3Version"
+    implementation "androidx.media3:media3-exoplayer-dash:$media3Version"
+    implementation "androidx.media3:media3-exoplayer-hls:$media3Version"
+    implementation "androidx.media3:media3-ui:$media3Version"
+    implementation "androidx.media3:media3-transformer:$media3Version"
+}
